@@ -15,6 +15,7 @@ import { getPageImage, savePageImage } from '../utils/pdfCache';
 import { mupdfController } from '../utils/mupdfController';
 import { useRamCache } from '../contexts/RamCacheContext';
 import { SearchHit } from '../utils/mupdfController';
+import { PDFDocument } from 'pdf-lib';
 
 // Removed html2canvas import as we now use pdf-lib for vector export
 
@@ -73,6 +74,18 @@ interface ContextMenuState {
     pointIndex?: number; // Optional if we clicked the body, not a vertex
     insertIndex?: number; // Index to insert a new point (for Add Point)
     insertPoint?: Point; // Coordinates of new point (for Add Point)
+}
+
+interface VectorPath {
+    type: 'line' | 'curve' | 'rect';
+    points: Point[];
+    closed?: boolean;
+}
+
+interface CachedVectorData {
+    pageIndex: number;
+    paths: VectorPath[];
+    bounds: { x: number; y: number; width: number; height: number };
 }
 
 const getClosestPointOnSegment = (p: Point, a: Point, b: Point): Point => {
@@ -157,6 +170,41 @@ const isShapeIntersectingRect = (shape: Shape, rectStart: Point, rectEnd: Point)
     }
 
     return false;
+};
+
+// Vector extraction functions
+const extractVectorPaths = async (file: File): Promise<CachedVectorData[]> => {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdfDoc = await PDFDocument.load(arrayBuffer);
+    const vectorData: CachedVectorData[] = [];
+    
+    for (let i = 0; i < pdfDoc.getPageCount(); i++) {
+        const page = pdfDoc.getPage(i);
+        const paths: VectorPath[] = [];
+        
+        // For now, we'll use a simplified approach
+        // In a full implementation, you'd parse the PDF content stream
+        // This is a placeholder that would need proper PDF parsing
+        
+        vectorData.push({
+            pageIndex: i,
+            paths,
+            bounds: {
+                x: 0,
+                y: 0,
+                width: page.getWidth(),
+                height: page.getHeight()
+            }
+        });
+    }
+    
+    return vectorData;
+};
+
+const renderPdfAsImage = async (file: File): Promise<string> => {
+    // For now, we'll use the existing MuPDF rendering
+    // In a full implementation, this would render the PDF page to an image
+    return '';
 };
 
 // Helper function to copy selected items to clipboard
@@ -355,6 +403,10 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
     const [muPdfLoaded, setMuPdfLoaded] = useState(false);
     const vectorCanvasRef = useRef<HTMLCanvasElement>(null);
 
+    // Vector data caching
+    const [cachedVectors, setCachedVectors] = useState<CachedVectorData[]>([]);
+    const [pdfImage, setPdfImage] = useState<string | null>(null);
+
     // Reset loaded state when page changes so we prioritize the new page
     useEffect(() => {
         setIsCurrentPageLoaded(false);
@@ -507,8 +559,8 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
         const ids = new Set<string>();
         ids.add(targetShape.id);
 
-        // If it's a positive Area, include its holes in the selection for context
-        if (activeItem.type === ToolType.AREA && !targetShape.deduction) {
+        // If it's a positive Area, Volume, or Fill, include its holes in the selection for context
+        if ((activeItem.type === ToolType.AREA || activeItem.type === ToolType.VOLUME || activeItem.type === ToolType.FILL) && !targetShape.deduction) {
             const holes = activeItem.shapes.filter(s => s.deduction && s.points.length > 0 && isPointInPolygon(s.points[0], targetShape.points));
             holes.forEach(h => ids.add(h.id));
         }
@@ -622,6 +674,13 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
                 setOriginalPdfWidth(dims.width);
                 setPdfAspectRatio(dims.height / dims.width);
                 onPageWidthChange(dims.width);
+
+                // Extract vector data and render image
+                const vectorData = await extractVectorPaths(file);
+                setCachedVectors(vectorData);
+                
+                const imageData = await renderPdfAsImage(file);
+                setPdfImage(imageData);
 
                 if (onPageLoaded) onPageLoaded();
                 setIsCurrentPageLoaded(true); // Mark as ready
@@ -851,6 +910,7 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
 
                 if (drawingPoints.length > 0 && !showScaleModal) {
                     if (activeTool === ToolType.AREA && drawingPoints.length < 3) return;
+                    if (activeTool === ToolType.VOLUME && drawingPoints.length < 3) return;
                     if (activeTool === ToolType.LINEAR && drawingPoints.length < 2) return;
                     e.preventDefault();
                     finalizeMeasurement(drawingPoints);
@@ -1157,7 +1217,7 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
     };
 
     const updateLoupe = (clientX: number, clientY: number) => {
-        const precisionTools = [ToolType.SCALE, ToolType.SEGMENT, ToolType.DIMENSION, ToolType.LINEAR, ToolType.AREA, ToolType.NOTE];
+        const precisionTools = [ToolType.SCALE, ToolType.SEGMENT, ToolType.DIMENSION, ToolType.LINEAR, ToolType.AREA, ToolType.VOLUME, ToolType.NOTE];
         if (!precisionTools.includes(activeTool)) {
             if (showLoupe) setShowLoupe(false);
             return;
@@ -1249,7 +1309,7 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
             return;
         }
 
-        const measurementTools = [ToolType.LINEAR, ToolType.AREA, ToolType.SEGMENT, ToolType.DIMENSION, ToolType.NOTE];
+        const measurementTools = [ToolType.LINEAR, ToolType.ARC, ToolType.AREA, ToolType.VOLUME, ToolType.FILL, ToolType.SEGMENT, ToolType.DIMENSION, ToolType.NOTE];
         if (measurementTools.includes(activeTool) && !scaleInfo.isSet) {
             addToast("Scale is not set. Please calibrate scale first.", 'error');
             return;
@@ -1277,12 +1337,27 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
                     return;
                 }
                 setDrawingPoints([...drawingPoints, point]);
+            } else if (activeTool === ToolType.VOLUME) {
+                if (drawingPoints.length >= 3 && point === drawingPoints[0]) {
+                    finalizeMeasurement([...drawingPoints]);
+                    return;
+                }
+                setDrawingPoints([...drawingPoints, point]);
             } else if (activeTool === ToolType.LINEAR) {
                 if (drawingPoints.length >= 2 && point === drawingPoints[0]) {
                     finalizeMeasurement([...drawingPoints, point]);
                     return;
                 }
                 setDrawingPoints([...drawingPoints, point]);
+            } else if (activeTool === ToolType.ARC) {
+                if (drawingPoints.length >= 2 && point === drawingPoints[0]) {
+                    finalizeMeasurement([...drawingPoints, point]);
+                    return;
+                }
+                setDrawingPoints([...drawingPoints, point]);
+            } else if (activeTool === ToolType.FILL) {
+                // Fill tool: detect enclosed areas and create filled shapes
+                handleFillClick(point);
             } else if (activeTool === ToolType.NOTE) {
                 if (drawingPoints.length === 0) {
                     setDrawingPoints([point]);
@@ -1430,7 +1505,7 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
         const item = items.find(i => i.id === itemId);
         const shape = item?.shapes.find(s => s.id === shapeId);
 
-        if (item && shape && (item.type === ToolType.LINEAR || item.type === ToolType.SEGMENT || item.type === ToolType.DIMENSION)) {
+        if (item && shape && (item.type === ToolType.LINEAR || item.type === ToolType.ARC || item.type === ToolType.SEGMENT || item.type === ToolType.DIMENSION)) {
             const part1Points = shape.points.slice(0, pointIndex + 1);
             const part2Points = shape.points.slice(pointIndex);
 
@@ -1473,9 +1548,11 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
         // newPoints are already in PDF space (passed from handlers that convert to PDF space)
         const pdfPoints = newPoints;
 
-        if (item.type === ToolType.SEGMENT || item.type === ToolType.LINEAR || item.type === ToolType.DIMENSION) {
+        if (item.type === ToolType.SEGMENT || item.type === ToolType.LINEAR || item.type === ToolType.ARC || item.type === ToolType.DIMENSION) {
             newValue = getScaledValue(calculatePolylineLength(pdfPoints), ppu);
         } else if (item.type === ToolType.AREA) {
+            newValue = getScaledArea(calculatePolygonArea(pdfPoints), ppu);
+        } else if (item.type === ToolType.VOLUME) {
             newValue = getScaledArea(calculatePolygonArea(pdfPoints), ppu);
         } else if (item.type === ToolType.COUNT) {
             newValue = newPoints.length;
@@ -1502,6 +1579,130 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
         setSnapPoint(null);
     }, [activeTool, globalPageIndex]);
 
+    const handleFillClick = (point: Point) => {
+        // Use cached vector data for more accurate fill detection
+        const currentVectors = cachedVectors.find(v => v.pageIndex === globalPageIndex);
+        
+        if (currentVectors && currentVectors.paths.length > 0) {
+            // Use vector paths for fill detection
+            const enclosedAreas = findEnclosedAreasFromVectors(currentVectors.paths, point);
+            
+            if (enclosedAreas.length > 0) {
+                const area = calculatePolygonArea(enclosedAreas[0]);
+                finalizeMeasurement(enclosedAreas[0]);
+                return;
+            }
+        }
+        
+        // Fallback to existing shape-based detection
+        const allSegments: Array<{ start: Point, end: Point }> = [];
+        
+        items.forEach(item => {
+            if (item.visible === false || item.hiddenPages?.includes(globalPageIndex)) return;
+            
+            item.shapes.forEach(shape => {
+                if (shape.pageIndex !== globalPageIndex) return;
+                
+                // Only consider linear shapes (lines, arcs, segments, dimensions)
+                if ([ToolType.LINEAR, ToolType.ARC, ToolType.SEGMENT, ToolType.DIMENSION].includes(item.type)) {
+                    for (let i = 0; i < shape.points.length - 1; i++) {
+                        allSegments.push({
+                            start: shape.points[i],
+                            end: shape.points[i + 1]
+                        });
+                    }
+                }
+            });
+        });
+
+        // Try to find closed loops and check if point is inside
+        const closedLoops = findClosedLoops(allSegments);
+        
+        for (const loop of closedLoops) {
+            if (isPointInPolygon(point, loop)) {
+                // Found a containing loop, create filled area
+                finalizeMeasurement(loop);
+                return;
+            }
+        }
+        
+        addToast("No enclosed area found at clicked location", 'info');
+    };
+
+    const findClosedLoops = (segments: Array<{ start: Point, end: Point }>): Point[][] => {
+        // Simple implementation: look for segments that form closed shapes
+        // This is a basic implementation - a full solution would be much more complex
+        
+        const loops: Point[][] = [];
+        const usedSegments = new Set<number>();
+        
+        for (let i = 0; i < segments.length; i++) {
+            if (usedSegments.has(i)) continue;
+            
+            const loop = traceLoop(segments, i, usedSegments);
+            if (loop.length >= 3) {
+                loops.push(loop);
+            }
+        }
+        
+        return loops;
+    };
+
+    const findEnclosedAreasFromVectors = (paths: VectorPath[], clickPoint: Point): Point[][] => {
+        // Find closed vector paths that contain the click point
+        const areas: Point[][] = [];
+        
+        paths.forEach(path => {
+            if (path.closed && path.points.length >= 3 && isPointInPolygon(clickPoint, path.points)) {
+                areas.push(path.points);
+            }
+        });
+        
+        return areas;
+    };
+
+    const traceLoop = (segments: Array<{ start: Point, end: Point }>, startIndex: number, used: Set<number>): Point[] => {
+        const loop: Point[] = [];
+        let currentIndex = startIndex;
+        let currentEnd = segments[startIndex].end;
+        loop.push(segments[startIndex].start);
+        
+        const maxIterations = segments.length; // Prevent infinite loops
+        let iterations = 0;
+        
+        while (iterations < maxIterations) {
+            used.add(currentIndex);
+            loop.push(currentEnd);
+            
+            // Find next connected segment
+            let found = false;
+            for (let i = 0; i < segments.length; i++) {
+                if (used.has(i)) continue;
+                
+                const seg = segments[i];
+                const distance = calculateDistance(currentEnd, seg.start);
+                if (distance < 1) { // Close enough to be connected
+                    currentIndex = i;
+                    currentEnd = seg.end;
+                    found = true;
+                    break;
+                }
+            }
+            
+            if (!found) break;
+            
+            // Check if we've closed the loop
+            const distanceToStart = calculateDistance(currentEnd, segments[startIndex].start);
+            if (distanceToStart < 1) {
+                break; // Closed the loop
+            }
+            
+            iterations++;
+        }
+        
+        return loop;
+    };
+
     const finalizeMeasurement = (points: Point[]) => {
         let value = 0;
         const ppu = scaleInfo.ppu;
@@ -1510,7 +1711,15 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
 
         if (activeTool === ToolType.SEGMENT || activeTool === ToolType.LINEAR || activeTool === ToolType.DIMENSION) {
             value = getScaledValue(calculatePolylineLength(pdfPoints), ppu);
+        } else if (activeTool === ToolType.ARC) {
+            // For arcs, calculate length including curved segments
+            // For now, treat as polyline until we implement bulge handling
+            value = getScaledValue(calculatePolylineLength(pdfPoints), ppu);
+        } else if (activeTool === ToolType.FILL) {
+            value = getScaledArea(calculatePolygonArea(pdfPoints), ppu);
         } else if (activeTool === ToolType.AREA) {
+            value = getScaledArea(calculatePolygonArea(pdfPoints), ppu);
+        } else if (activeTool === ToolType.VOLUME) {
             value = getScaledArea(calculatePolygonArea(pdfPoints), ppu);
         } else if (activeTool === ToolType.COUNT) {
             value = points.length;
@@ -1610,7 +1819,7 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
 
     const sortedItems = useMemo(() => {
         return [...items].sort((a, b) => {
-            const score = (t: ToolType) => t === ToolType.AREA ? 0 : 1;
+            const score = (t: ToolType) => (t === ToolType.AREA || t === ToolType.VOLUME) ? 0 : 1;
             return score(a.type) - score(b.type);
         });
     }, [items]);
@@ -1656,6 +1865,15 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
                         />
                     )}
 
+                    {/* PDF Image Layer (Vector-based) */}
+                    {pdfImage && (
+                        <img
+                            src={pdfImage}
+                            style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, objectFit: 'contain' }}
+                            alt="PDF Image"
+                        />
+                    )}
+
                     {/* MuPDF Vector Render Layer (High Performance) */}
                     {muPdfLoaded ? (
                         <canvas
@@ -1692,6 +1910,21 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
                         onClick={handleStageClick}
                     >
                         <Layer ref={konvaLayerRef}>
+                            {/* Render cached vector paths for snapping reference */}
+                            {cachedVectors
+                                .filter(vectorData => vectorData.pageIndex === globalPageIndex)
+                                .map(vectorData => 
+                                    vectorData.paths.map((path, pathIndex) => (
+                                        <KonvaLine
+                                            key={`vector-${pathIndex}`}
+                                            points={path.points.flatMap(p => [p.x, p.y])}
+                                            stroke="rgba(0,0,0,0.1)"
+                                            strokeWidth={1}
+                                            closed={path.closed}
+                                        />
+                                    ))
+                                )}
+
                             {sortedItems.map(item => {
                                 if (item.visible === false || item.hiddenPages?.includes(globalPageIndex)) return null;
                                 const shapesOnPage = item.shapes.filter(s => s.pageIndex === globalPageIndex);
@@ -1701,7 +1934,7 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
                                     const isFocused = focusedShapeIds.has(shape.id);
                                     const isDimmed = focusedShapeIds.size > 0 && !isFocused;
 
-                                    const opacity = item.type === ToolType.AREA ? 0.4 : 1;
+                                    const opacity = (item.type === ToolType.AREA || item.type === ToolType.VOLUME || item.type === ToolType.FILL) ? 0.4 : 1;
                                     const strokeColor = isSelected ? '#3b82f6' : item.color;
                                     const strokeWidth = (isSelected ? 9 : 6) * visualScaleFactor;
 
@@ -1754,8 +1987,8 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
                                                         shapesToDrag.push({ itemId: sel.itemId, shapeId: sel.shapeId, initialPoints: [...s.points] });
                                                         processedIds.add(sel.shapeId);
 
-                                                        // Check for child cutouts (Deductions inside Area)
-                                                        if (i.type === ToolType.AREA && !s.deduction) {
+                                                        // Check for child cutouts (Deductions inside Area, Volume, or Fill)
+                                                        if ((i.type === ToolType.AREA || i.type === ToolType.VOLUME || i.type === ToolType.FILL) && !s.deduction) {
                                                             const childCutouts = i.shapes.filter(other =>
                                                                 other.deduction &&
                                                                 !processedIds.has(other.id) &&
@@ -1784,7 +2017,7 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
                                                 if (container) container.style.cursor = activeTool === ToolType.SELECT ? 'default' : 'crosshair';
                                             }}
                                         >
-                                            {item.type === ToolType.AREA && (
+                                            {(item.type === ToolType.AREA || item.type === ToolType.VOLUME || item.type === ToolType.FILL) && (
                                                 <>
                                                     {shape.deduction ? (
                                                         <>
@@ -1817,7 +2050,7 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
                                                     )}
                                                 </>
                                             )}
-                                            {(item.type === ToolType.LINEAR || item.type === ToolType.SEGMENT || item.type === ToolType.DIMENSION) && (
+                                            {(item.type === ToolType.LINEAR || item.type === ToolType.ARC || item.type === ToolType.SEGMENT || item.type === ToolType.DIMENSION) && (
                                                 <KonvaLine
                                                     points={shape.points.flatMap(p => [p.x * shapeRenderScale, p.y * shapeRenderScale])}
                                                     stroke={strokeColor}
@@ -1920,7 +2153,7 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
                                         stroke={items.find(i => i.id === activeTakeoffId)?.color || 'red'}
                                         strokeWidth={3 * visualScaleFactor}
                                         dash={[5 * visualScaleFactor, 5 * visualScaleFactor]}
-                                        closed={activeTool === ToolType.AREA && drawingPoints.length >= 2}
+                                        closed={(activeTool === ToolType.AREA || activeTool === ToolType.VOLUME) && drawingPoints.length >= 2}
                                     />
                                     {drawingPoints.map((p, i) => (
                                         <Circle key={i} x={p.x} y={p.y} radius={4 * visualScaleFactor} fill="white" stroke="red" strokeWidth={1} />
@@ -2066,7 +2299,7 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
                                         processedIds.add(sel.shapeId);
 
                                         // Child Cutout Logic
-                                        if (item.type === ToolType.AREA) {
+                                        if (item.type === ToolType.AREA || item.type === ToolType.VOLUME || item.type === ToolType.FILL) {
                                             const parentShape = item.shapes.find(s => s.id === sel.shapeId);
                                             if (parentShape && !parentShape.deduction) {
                                                 const childCutouts = item.shapes.filter(other =>
@@ -2108,7 +2341,7 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
 
                     {(() => {
                         const item = items.find(i => i.id === contextMenu.itemId);
-                        if (item && item.type === ToolType.AREA) {
+                        if (item && (item.type === ToolType.AREA || item.type === ToolType.VOLUME || item.type === ToolType.FILL)) {
                             return (
                                 <button
                                     onClick={handleExecuteAddCutout}
@@ -2123,7 +2356,7 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
 
                     {(() => {
                         const item = items.find(i => i.id === contextMenu.itemId);
-                        if (item && (item.type === ToolType.LINEAR || item.type === ToolType.SEGMENT || item.type === ToolType.DIMENSION) && contextMenu.pointIndex !== undefined) {
+                        if (item && (item.type === ToolType.LINEAR || item.type === ToolType.ARC || item.type === ToolType.SEGMENT || item.type === ToolType.DIMENSION) && contextMenu.pointIndex !== undefined) {
                             return (
                                 <button
                                     onClick={handleExecuteBreakPath}
@@ -2158,7 +2391,7 @@ const BlueprintCanvas = forwardRef<BlueprintCanvasRef, BlueprintCanvasProps>(({
                         </div>
                         <div className="flex gap-2 mb-4">
                             <input autoFocus className="border p-2 flex-1 rounded bg-white text-slate-900" placeholder="Length (e.g. 50')" value={scaleInputStr} onChange={e => setScaleInputStr(e.target.value)} />
-                            <select className="border p-2 rounded bg-white text-slate-900" value={scaleUnit} onChange={e => setScaleUnit(e.target.value as Unit)}>{Object.values(Unit).map(u => <option key={u} value={u}>{u}</option>)}</select>
+                            <select className="border p-2 rounded bg-white text-slate-900" title="Unit of measurement" aria-label="Unit of measurement" value={scaleUnit} onChange={e => setScaleUnit(e.target.value as Unit)}>{Object.values(Unit).map(u => <option key={u} value={u}>{u}</option>)}</select>
                         </div>
                         <div className="flex justify-end gap-2">
                             <button onClick={() => { setShowScaleModal(false); setDrawingPoints([]); }} className="text-slate-500 px-4">Cancel</button>
