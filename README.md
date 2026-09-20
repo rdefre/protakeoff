@@ -5,10 +5,10 @@
 </a>
 
 # ProTakeoff
-### Free & Open Source Construction Estimating & Takeoff Software[[1](https://www.google.com/url?sa=E&q=https%3A%2F%2Fprotakeoff.org)]
+### Free & Open Source Construction Estimating & Takeoff Software
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
-![Version](https://img.shields.io/badge/version-0.1.0-blue?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.0.0-blue?style=for-the-badge)
 ![Status](https://img.shields.io/badge/status-active-success?style=for-the-badge)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=for-the-badge)](http://makeapullrequest.com)
 
@@ -121,7 +121,7 @@ ProTakeoff is engineered for performance using the "T3" (Tauri, TypeScript, Tail
 ### Prerequisites
 - **Node.js** (v18+)
 - **Rust** (Stable)
-- **pnpm** (recommended) or **npm**
+- **npm** (the tracked lockfile and Tauri build commands use npm)
 
 ### Installation
 
@@ -129,3 +129,15 @@ ProTakeoff is engineered for performance using the "T3" (Tauri, TypeScript, Tail
    ```bash
    git clone https://github.com/ilirkl/protakeoff-ai3.git
    cd protakeoff-ai3
+   ```
+
+   The URL above is the upstream project, not a guarantee of this fork's current branch. Use your configured fork remote when continuing local custom work.
+
+2. **Install the tracked dependency graph and start development**
+   ```bash
+   npm ci
+   npm run tauri dev
+   ```
+   For frontend-only development, use `npm run dev`. Build the frontend with `npm run build`.
+
+September 20, 2026 documentation check: the version above matches `package.json` and `src-tauri/tauri.conf.json`. Commands match the checked-in scripts; installation, build and application behavior were not revalidated in this pass. Preserve existing untracked licensing work and the alternate lockfile pending their own review.
